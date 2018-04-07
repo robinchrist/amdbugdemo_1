@@ -41,7 +41,7 @@ Why does 23170 | 185367 work? Well, let's take a look at the products of the par
 
 Note the limit of uint32_t: 4 294 967 295! 
 
-# TL; DR
+#TL; DR
 For targetMatrixSize <= 23170 profiling is working, for targetMatrixSize > 23171 profiling does not work
 CL_PROFILING_COMMAND_START == CL_PROFILING_COMMAND_END
 
