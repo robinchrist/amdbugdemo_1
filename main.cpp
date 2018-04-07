@@ -2,6 +2,7 @@
 #include "CL/cl.hpp"
 #include <vector>
 #include <complex>
+#include <algorithm>
 
 int main() {
 
@@ -73,7 +74,10 @@ int main() {
     }
     std::cout << "Info: Initialized cl::CommandQueue for chosen device and platform" << std::endl;
 
-    size_t targetMatrixSize = 25000; //arbitrary value, increase if bug does not occur
+	//CRICITAL VALUE: 23170! 23171 is the first non-working value
+    constexpr size_t targetMatrixSize = 23170; //arbitrary value, increase if bug does not occur
+
+	static_assert(targetMatrixSize >= 1000, "Matrix must be big! 1000 is not enough...");
 
     //The maximum allocatable bytes per buffer
     size_t maxBufferBytes = device.getInfo<CL_DEVICE_MAX_MEM_ALLOC_SIZE>(&returnCode);
@@ -90,7 +94,7 @@ int main() {
     }
 
     //Maximum size of the matrix stripe
-    size_t maxMatrixStripeSize = std::min(maxBufferBytes, maxGlobalBytes);
+    size_t maxMatrixStripeSize = std::min<size_t>(maxBufferBytes, maxGlobalBytes);
 
     //maximum matrix size per buffer, solve matrixSizeInBytes = n² * sizeof(std::complex<float>) for n
     size_t matrixSizeLimitedByMaxBufferBytes = static_cast<size_t>(std::floor(std::sqrt((double)(maxBufferBytes) / (double) sizeof(std::complex<float>))));
@@ -98,19 +102,22 @@ int main() {
     //maximum matrix size limited by global memory, solve n² = sizeof(std::complex<float>) for n
     size_t matrixSizeLimitedByMaxGlobalBytes = static_cast<size_t>(std::floor(std::sqrt((double)(maxGlobalBytes) / (double) sizeof(std::complex<float>))));
 
-    size_t matrixSizeLimit = std::min(matrixSizeLimitedByMaxBufferBytes, matrixSizeLimitedByMaxGlobalBytes);
+    size_t matrixSizeLimit = std::min<size_t>(matrixSizeLimitedByMaxBufferBytes, matrixSizeLimitedByMaxGlobalBytes);
 
     std::cout << "Info: Targeted matrix size: " << targetMatrixSize << std::endl;
     std::cout << "Info: Matrix size limit: " << matrixSizeLimit << std::endl;
 
+	size_t columnLimit = static_cast<size_t>(std::floor((double)maxMatrixStripeSize / ((double)targetMatrixSize * (double) sizeof(std::complex<float>))));
+
     if (targetMatrixSize <= matrixSizeLimit) {
         std::cout << "Info: Targeted matrix size is too small, bug will not occur, because matrix fits in memory" << std::endl;
-        return -1;
+		std::cout << "Info: Setting columnLimit to an artificially small value" << std::endl;
+		columnLimit = static_cast<size_t>(std::floor((double)targetMatrixSize / 2.0));
     } else {
         std::cout << "Info: Targeted matrix size is big enough, matrix will be split up into stripes" << std::endl;
     }
 
-    size_t columnLimit = static_cast<size_t>(std::floor((double) maxMatrixStripeSize / ((double) targetMatrixSize * (double) sizeof(std::complex<float>))));
+    
 
     if (columnLimit == 0) {
         std::cout << "Error: Matrix size is too big. Device can not find at least one column of the matrix" << std::endl;
@@ -168,6 +175,8 @@ int main() {
     size_t host_row_pitch = targetMatrixSize * sizeof(std::complex<float>); //Host has targetMeshSize columns width
     size_t host_slice_pitch = 0;
 
+	std::cout << "Running without profiling and not blocking (for CodeXL)" << std::endl;
+
     for (unsigned int fullEnqueueCounter = 0; fullEnqueueCounter < completeMatrixStripes; ++fullEnqueueCounter) {
 
         unsigned int firstColumnIndexOfIteration = fullEnqueueCounter * columnLimit; //The index of the leftmost column of the current part
@@ -176,12 +185,14 @@ int main() {
 
         std::cout << "Attempting to read buffer no." << fullEnqueueCounter + 1 << std::endl;
         //Read results back
-        returnCode = queue.enqueueReadBufferRect(workspaceBuffer, CL_TRUE, buffer_offset, host_offset, region, buffer_row_pitch, buffer_slice_pitch, host_row_pitch, host_slice_pitch, hostMemory);
+        returnCode = queue.enqueueReadBufferRect(workspaceBuffer, CL_FALSE, buffer_offset, host_offset, region, buffer_row_pitch, buffer_slice_pitch, host_row_pitch, host_slice_pitch, hostMemory);
         if (returnCode != 0) {
             std::cout << "Could not enqueue rectRead workspaceBuffer (OpenCL Error No. " << returnCode << "), exiting now..." << std::endl;
             return -1;
         }
         std::cout << "Read Buffer!" << std::endl;
+		queue.flush();
+		queue.finish();
 
     }
 
@@ -196,17 +207,170 @@ int main() {
 
         std::cout << "Attempting to last buffer" << std::endl;
         //Read results back
-        returnCode = queue.enqueueReadBufferRect(workspaceBuffer, CL_TRUE, buffer_offset, host_offset, region, buffer_row_pitch, buffer_slice_pitch, host_row_pitch, host_slice_pitch, hostMemory);
+        returnCode = queue.enqueueReadBufferRect(workspaceBuffer, CL_FALSE, buffer_offset, host_offset, region, buffer_row_pitch, buffer_slice_pitch, host_row_pitch, host_slice_pitch, hostMemory);
         if (returnCode != 0) {
             std::cout << "Could not enqueue rectRead workspaceBuffer (OpenCL Error No. " << returnCode << "), exiting now..." << std::endl;
             return -1;
         }
         std::cout << "Read Buffer!" << std::endl;
+		queue.finish();
+		queue.flush();
     }
 
-    std::cout << "All Buffers were successfully read, exiting now" << std::endl;
+	std::cout << "All Buffers were successfully read" << std::endl;
 
+	std::cout << "Now running with profiling, not blocking" << std::endl;
+	region[0] = columnLimit * sizeof(std::complex<float>); //Bytes per row
 
+	queue = cl::CommandQueue { context, device, CL_QUEUE_PROFILING_ENABLE, &returnCode }; //Create new command queue
+	if (returnCode != 0) {
+		std::cout << "Error when recreating command queue (OpenCL Error No. " << returnCode << "). Exiting now..." << std::endl;
+		return -1;
+	}
+	std::cout << "Recreated Command Queue" << std::endl;
+
+	cl::Event profilingEvent;
+
+	for (unsigned int fullEnqueueCounter = 0; fullEnqueueCounter < completeMatrixStripes; ++fullEnqueueCounter) {
+
+		unsigned int firstColumnIndexOfIteration = fullEnqueueCounter * columnLimit; //The index of the leftmost column of the current part
+
+		host_offset[0] = firstColumnIndexOfIteration * sizeof(std::complex<float>);
+
+		std::cout << "Attempting to read buffer no." << fullEnqueueCounter + 1 << std::endl;
+		//Read results back
+		returnCode = queue.enqueueReadBufferRect(workspaceBuffer, CL_FALSE, buffer_offset, host_offset, region, buffer_row_pitch, buffer_slice_pitch, host_row_pitch, host_slice_pitch, hostMemory, NULL, &profilingEvent);
+		if (returnCode != 0) {
+			std::cout << "Could not enqueue rectRead workspaceBuffer (OpenCL Error No. " << returnCode << "), exiting now..." << std::endl;
+			return -1;
+		}
+		std::cout << "Read Buffer!" << std::endl;
+		queue.flush();
+		queue.finish();
+
+		cl_ulong start = profilingEvent.getProfilingInfo<CL_PROFILING_COMMAND_START>(&returnCode);
+		if (returnCode != 0) {
+			std::cout << "Could not get CL_PROFILING_COMMAND_START" << std::endl;
+			return -1;
+		}
+
+		cl_ulong end = profilingEvent.getProfilingInfo<CL_PROFILING_COMMAND_END>(&returnCode);
+		if (returnCode != 0) {
+			std::cout << "Could not get CL_PROFILING_COMMAND_END" << std::endl;
+			return -1;
+		}
+
+		cl_ulong time_diff = end - start;
+
+		std::cout << "Data transfer took " << time_diff << "ns, start at " << start << ", end at " << end << std::endl;
+
+	}
+
+	if (hasRemainingColumns) {
+
+		unsigned int firstColumnIndexOfIteration = completeMatrixStripes * columnLimit; //The index of the leftmost column of the current part
+
+		host_offset[0] = firstColumnIndexOfIteration * sizeof(std::complex<float>); //offset in host buffer, as before
+
+																					//Note: This is the last step, we just process remainingIndexes columns
+		region[0] = remainingColumns * sizeof(std::complex<float>); //Bytes per remaining row
+
+		std::cout << "Attempting to last buffer" << std::endl;
+		//Read results back
+		returnCode = queue.enqueueReadBufferRect(workspaceBuffer, CL_FALSE, buffer_offset, host_offset, region, buffer_row_pitch, buffer_slice_pitch, host_row_pitch, host_slice_pitch, hostMemory, NULL, &profilingEvent);
+		if (returnCode != 0) {
+			std::cout << "Could not enqueue rectRead workspaceBuffer (OpenCL Error No. " << returnCode << "), exiting now..." << std::endl;
+			return -1;
+		}
+		std::cout << "Read Buffer!" << std::endl;
+		queue.finish();
+		queue.flush();
+		cl_ulong start = profilingEvent.getProfilingInfo<CL_PROFILING_COMMAND_START>(&returnCode);
+		if (returnCode != 0) {
+			std::cout << "Could not get CL_PROFILING_COMMAND_START" << std::endl;
+			return -1;
+		}
+
+		cl_ulong end = profilingEvent.getProfilingInfo<CL_PROFILING_COMMAND_END>(&returnCode);
+		if (returnCode != 0) {
+			std::cout << "Could not get CL_PROFILING_COMMAND_END" << std::endl;
+			return -1;
+		}
+
+		cl_ulong time_diff = end - start;
+
+		std::cout << "Data transfer took " << time_diff << "ns, start at " << start << ", end at " << end << std::endl;
+	}
+
+	std::cout << "Now running with profiling AND blocking (CL_TRUE)" << std::endl;
+	region[0] = columnLimit * sizeof(std::complex<float>); //Bytes per row
+	for (unsigned int fullEnqueueCounter = 0; fullEnqueueCounter < completeMatrixStripes; ++fullEnqueueCounter) {
+
+		unsigned int firstColumnIndexOfIteration = fullEnqueueCounter * columnLimit; //The index of the leftmost column of the current part
+
+		host_offset[0] = firstColumnIndexOfIteration * sizeof(std::complex<float>);
+
+		std::cout << "Attempting to read buffer no." << fullEnqueueCounter + 1 << std::endl;
+		//Read results back
+		returnCode = queue.enqueueReadBufferRect(workspaceBuffer, CL_TRUE, buffer_offset, host_offset, region, buffer_row_pitch, buffer_slice_pitch, host_row_pitch, host_slice_pitch, hostMemory, NULL, &profilingEvent);
+		if (returnCode != 0) {
+			std::cout << "Could not enqueue rectRead workspaceBuffer (OpenCL Error No. " << returnCode << "), exiting now..." << std::endl;
+			return -1;
+		}
+		std::cout << "Read Buffer!" << std::endl;
+
+		cl_ulong start = profilingEvent.getProfilingInfo<CL_PROFILING_COMMAND_START>(&returnCode);
+		if (returnCode != 0) {
+			std::cout << "Could not get CL_PROFILING_COMMAND_START" << std::endl;
+			return -1;
+		}
+
+		cl_ulong end = profilingEvent.getProfilingInfo<CL_PROFILING_COMMAND_END>(&returnCode);
+		if (returnCode != 0) {
+			std::cout << "Could not get CL_PROFILING_COMMAND_END" << std::endl;
+			return -1;
+		}
+
+		cl_ulong time_diff = end - start;
+
+		std::cout << "Data transfer took " << time_diff << "ns, start at " << start << ", end at " << end << std::endl;
+
+	}
+
+	if (hasRemainingColumns) {
+
+		unsigned int firstColumnIndexOfIteration = completeMatrixStripes * columnLimit; //The index of the leftmost column of the current part
+
+		host_offset[0] = firstColumnIndexOfIteration * sizeof(std::complex<float>); //offset in host buffer, as before
+
+																					//Note: This is the last step, we just process remainingIndexes columns
+		region[0] = remainingColumns * sizeof(std::complex<float>); //Bytes per remaining row
+
+		std::cout << "Attempting to last buffer" << std::endl;
+		//Read results back
+		returnCode = queue.enqueueReadBufferRect(workspaceBuffer, CL_TRUE, buffer_offset, host_offset, region, buffer_row_pitch, buffer_slice_pitch, host_row_pitch, host_slice_pitch, hostMemory, NULL, &profilingEvent);
+		if (returnCode != 0) {
+			std::cout << "Could not enqueue rectRead workspaceBuffer (OpenCL Error No. " << returnCode << "), exiting now..." << std::endl;
+			return -1;
+		}
+		std::cout << "Read Buffer!" << std::endl;
+
+		cl_ulong start = profilingEvent.getProfilingInfo<CL_PROFILING_COMMAND_START>(&returnCode);
+		if (returnCode != 0) {
+			std::cout << "Could not get CL_PROFILING_COMMAND_START" << std::endl;
+			return -1;
+		}
+
+		cl_ulong end = profilingEvent.getProfilingInfo<CL_PROFILING_COMMAND_END>(&returnCode);
+		if (returnCode != 0) {
+			std::cout << "Could not get CL_PROFILING_COMMAND_END" << std::endl;
+			return -1;
+		}
+
+		cl_ulong time_diff = end - start;
+
+		std::cout << "Data transfer took " << time_diff << "ns, start at " << start << ", end at " << end << std::endl;
+	}
 
 
 
