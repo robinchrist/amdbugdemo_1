@@ -1,4 +1,4 @@
-With the current AMD Radeon 18.2.1 drivers, there seems to be an issue using clEnqueueReadBufferRect (I haven't tested clEnqueueWriteBufferRect though) with large numbers:
+With the current AMD Radeon 18.3.4 drivers, there seems to be an issue using clEnqueueReadBufferRect (I haven't tested clEnqueueWriteBufferRect though) with large numbers:
 
 Suppose we want to generate BEM-matrices on the GPU. For problem sizes above a specific limit, the problem cannot be calculated in one run because either the total available memory size on the device or the maximum available memory per buffer is too small to hold the full matrices.
 
