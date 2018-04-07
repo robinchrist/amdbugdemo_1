@@ -4,7 +4,6 @@
 #include <complex>
 
 int main() {
-    std::cout << "Hello, World!" << std::endl;
 
     cl::Device device;     //No Multi-GPU Support in this proof-of-concept
     cl::Platform platform; //No Multi-GPU Support in this proof-of-concept
@@ -20,7 +19,7 @@ int main() {
             std::cout << "Error (OpenCL Error No. " << returnCode << ") when fetching platforms, exiting now..." << std::endl;
             return -1;
         }
-        if (all_platforms.empty()) { //cl::Platform::get returned no OpenCL Platforms
+        if (all_platforms.size() == 0) { //cl::Platform::get returned no OpenCL Platforms
             std::cout << "Error: No Platforms were found. Exiting now..." << std::endl;
             return -1;
         }
@@ -28,7 +27,7 @@ int main() {
             all_devices.resize(0); //Reset vector
             returnCode = plat.getDevices(CL_DEVICE_TYPE_GPU, &all_devices); //Fetch GPUs an Accelerators
 
-            if (all_devices.empty() == 0) { //No devices matching criteria in this platform
+            if (all_devices.size() == 0) { //No devices matching criteria in this platform
                 continue; //Continue with next platform
             }
             platform = plat;         //Select the current platform
@@ -65,7 +64,7 @@ int main() {
         std::cout << "Error when initializing cl::Context for chosen device and platform (OpenCL Error No. " << returnCode << "). Exiting now..." << std::endl;
         return -1;
     }
-    std::cout << "Info: Initializted cl::Context for chosen device and platform" << std::endl;
+    std::cout << "Info: Initialized cl::Context for chosen device and platform" << std::endl;
 
     cl::CommandQueue queue{ context, device, 0U, &returnCode }; //Create command queue
     if (returnCode != 0) {
